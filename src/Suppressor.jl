@@ -3,7 +3,7 @@ __precompile__()
 module Suppressor
 
 export @suppress, @suppress_out, @suppress_err
-export @capture_out, @capture_err
+export @capture, @capture_out, @capture_err
 export @color_output
 
 """
@@ -109,6 +109,54 @@ macro suppress_err(block)
     end
 end
 
+
+"""
+    @capture expr
+
+Capture the `stdout` and `stderr` streams for the given expression.
+"""
+macro capture(block)
+    quote
+        if ccall(:jl_generating_output, Cint, ()) == 0
+            original_stdout = stdout
+            out_rd, out_wr = redirect_stdout()
+            out_reader = @async read(out_rd, String)
+
+            original_stderr = stderr
+            err_rd, err_wr = redirect_stderr()
+            err_reader = @async read(err_rd, String)
+
+            logstate = Base.CoreLogging._global_logstate
+            logger = logstate.logger
+            if logger.stream == original_stderr
+                new_logstate = Base.CoreLogging.LogState(typeof(logger)(err_wr, logger.min_level))
+                Core.eval(Base.CoreLogging, Expr(:(=), :(_global_logstate), new_logstate))
+            end
+        end
+
+        try
+            $(esc(block))
+        finally
+            if ccall(:jl_generating_output, Cint, ()) == 0
+                redirect_stdout(original_stdout)
+                close(out_wr)
+
+                redirect_stderr(original_stderr)
+                close(err_wr)
+
+                if logger.stream == stderr
+                    Core.eval(Base.CoreLogging, Expr(:(=), :(_global_logstate), logstate))
+                end
+            end
+        end
+
+        if ccall(:jl_generating_output, Cint, ()) == 0
+            (fetch(out_reader), fetch(err_reader))
+        else
+            ("", "")
+        end
+    end
+end
 
 """
     @capture_out expr
